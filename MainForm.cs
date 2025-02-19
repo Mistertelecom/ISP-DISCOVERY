@@ -14,22 +14,17 @@ namespace NetworkDiscovery
         private NetworkSniffer sniffer;
         private MaterialListView deviceListView;
         private MaterialComboBox interfaceComboBox;
-        private MaterialComboBox languageComboBox;
         private MaterialButton scanButton;
         private MaterialMultiLineTextBox2 logTextBox;
         private MaterialLabel interfaceLabel;
-        private MaterialLabel languageLabel;
-        private string currentLanguage = "en";
-
+        
         public MainForm()
         {
             InitializeComponent();
+            AppConfig.Load();
             InitializeMaterialSkin();
             InitializeSniffer();
             LoadNetworkInterfaces();
-            languageComboBox.Items.Add("English");
-            languageComboBox.Items.Add("Português");
-            languageComboBox.SelectedIndex = 0;
             UpdateLanguage();
         }
 
@@ -37,7 +32,9 @@ namespace NetworkDiscovery
         {
             var materialSkinManager = MaterialSkinManager.Instance;
             materialSkinManager.AddFormToManage(this);
-            materialSkinManager.Theme = MaterialSkinManager.Themes.LIGHT;
+            materialSkinManager.Theme = AppConfig.DarkMode ? 
+                MaterialSkinManager.Themes.DARK : 
+                MaterialSkinManager.Themes.LIGHT;
             materialSkinManager.ColorScheme = new ColorScheme(
                 Primary.Blue600, Primary.Blue700, Primary.Blue100, Accent.LightBlue200, TextShade.WHITE);
         }
@@ -104,23 +101,6 @@ namespace NetworkDiscovery
                 Font = new Font("Segoe UI", 10, FontStyle.Regular)
             };
 
-            languageLabel = new MaterialLabel
-            {
-                Text = "Idioma",
-                AutoSize = true,
-                Margin = new Padding(20, 15, 5, 0),
-                Font = new Font("Segoe UI", 10, FontStyle.Regular),
-                TextAlign = ContentAlignment.MiddleCenter
-            };
-
-            languageComboBox = new MaterialComboBox
-            {
-                Width = 170,
-                DropDownStyle = ComboBoxStyle.DropDownList,
-                Margin = new Padding(0, 10, 15, 0),
-                Font = new Font("Segoe UI", 10, FontStyle.Regular)
-            };
-
             scanButton = new MaterialButton
             {
                 Text = "Iniciar Varredura",
@@ -129,14 +109,31 @@ namespace NetworkDiscovery
                 Font = new Font("Segoe UI", 10, FontStyle.Regular)
             };
 
+            var settingsButton = new MaterialButton
+            {
+                Text = "⚙",
+                Margin = new Padding(10),
+                MinimumSize = new Size(40, 36),
+                AutoSize = true
+            };
+
             scanButton.Click += ScanButton_Click;
-            languageComboBox.SelectedIndexChanged += LanguageComboBox_SelectedIndexChanged;
+            settingsButton.Click += (s, e) => {
+                var settingsForm = new SettingsForm { Owner = this };
+                settingsForm.SettingsChanged += () => {
+                    UpdateLanguage();
+                    var materialSkinManager = MaterialSkinManager.Instance;
+                    materialSkinManager.Theme = AppConfig.DarkMode ? 
+                        MaterialSkinManager.Themes.DARK : 
+                        MaterialSkinManager.Themes.LIGHT;
+                };
+                settingsForm.ShowDialog();
+            };
 
             panel.Controls.Add(interfaceLabel);
             panel.Controls.Add(interfaceComboBox);
-            panel.Controls.Add(languageLabel);
-            panel.Controls.Add(languageComboBox);
             panel.Controls.Add(scanButton);
+            panel.Controls.Add(settingsButton);
         }
 
         private void ConfigureContentPanel(Panel panel)
@@ -152,11 +149,13 @@ namespace NetworkDiscovery
                 BackColor = Color.White,
                 Font = new Font("Segoe UI", 10, FontStyle.Regular)
             };
+            
             deviceListView.Columns.Add("Marca", 100);
             deviceListView.Columns.Add("Endereço IP", 150);
             deviceListView.Columns.Add("Endereço MAC", 150);
             deviceListView.Columns.Add("Nome", 200);
             deviceListView.Columns.Add("Método de Descoberta", 150);
+            deviceListView.Columns.Add("Modelo", 150);
 
             logTextBox = new MaterialMultiLineTextBox2
             {
@@ -190,25 +189,30 @@ namespace NetworkDiscovery
                 interfaceComboBox.SelectedIndex = 0;
         }
 
-        private void LanguageComboBox_SelectedIndexChanged(object sender, EventArgs e)
+        public void UpdateLanguage()
         {
-            currentLanguage = languageComboBox.SelectedIndex == 0 ? "en" : "pt-BR";
-            UpdateLanguage();
-        }
-
-        private void UpdateLanguage()
-        {
-            var trans = Languages.Translations[currentLanguage];
+            var trans = Languages.Translations[AppConfig.Language];
+            
+            // Atualizar interface
             this.Text = trans["Title"];
             interfaceLabel.Text = trans["SelectInterface"];
-            languageLabel.Text = trans["SelectLanguage"];
             scanButton.Text = trans["StartScan"];
+            
+            // Atualizar colunas
+            deviceListView.Columns[0].Text = trans["Brand"];
+            deviceListView.Columns[1].Text = trans["IPAddress"];
+            deviceListView.Columns[2].Text = trans["MACAddress"];
+            deviceListView.Columns[3].Text = trans["Name"];
+            deviceListView.Columns[4].Text = trans["DiscoveryMethod"];
+            deviceListView.Columns[5].Text = trans["Model"];
+            
+            // logTextBox.LabelText = trans["LogTitle"]; // Removed because MaterialMultiLineTextBox2 does not have LabelText property
         }
 
         private void Sniffer_OnPacketCaptured(object sender, PacketCaptureEventArgs e)
         {
             logTextBox.Text += $"[{DateTime.Now:HH:mm:ss.fff}] " +
-                string.Format(Languages.Translations[currentLanguage]["PacketCaptured"], e.SourceIP)
+                string.Format(Languages.Translations[AppConfig.Language]["PacketCaptured"], e.SourceIP)
                 + Environment.NewLine;
         }
 
@@ -216,7 +220,7 @@ namespace NetworkDiscovery
         {
             AddDeviceToList(device);
             logTextBox.Text += $"[{DateTime.Now:HH:mm:ss.fff}] " +
-                string.Format(Languages.Translations[currentLanguage]["DeviceFound"], device.Brand, device.IPAddress)
+                string.Format(Languages.Translations[AppConfig.Language]["DeviceFound"], device.Brand, device.IPAddress)
                 + Environment.NewLine;
         }
 
@@ -227,6 +231,7 @@ namespace NetworkDiscovery
             row.SubItems.Add(device.MacAddress);
             row.SubItems.Add(device.Name);
             row.SubItems.Add(device.DiscoveryMethod);
+            row.SubItems.Add(device.Model);
             deviceListView.Items.Add(row);
         }
 
@@ -234,44 +239,35 @@ namespace NetworkDiscovery
         {
             if (interfaceComboBox.SelectedItem == null)
             {
-                MessageBox.Show(Languages.Translations[currentLanguage]["ErrorNoInterface"], 
+                MessageBox.Show(Languages.Translations[AppConfig.Language]["ErrorNoInterface"], 
                     "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
-            if (scanButton.Text == Languages.Translations[currentLanguage]["StartScan"])
+            if (scanButton.Text == Languages.Translations[AppConfig.Language]["StartScan"])
             {
                 try
                 {
                     var selectedInterface = (NetworkInterfaceItem)interfaceComboBox.SelectedItem;
                     deviceListView.Items.Clear();
                     logTextBox.Text = "";
-
-                    // Inicia a varredura em uma thread separada
+                    
                     await Task.Run(() => sniffer.StartCapture(selectedInterface.Device.Name));
-
-                    scanButton.Text = Languages.Translations[currentLanguage]["StopScan"];
+                    
+                    scanButton.Text = Languages.Translations[AppConfig.Language]["StopScan"];
                     interfaceComboBox.Enabled = false;
-                    languageComboBox.Enabled = false;
-
-                    logTextBox.Text += $"[{DateTime.Now:HH:mm:ss.fff}] " +
-                        Languages.Translations[currentLanguage]["Scanning"] + Environment.NewLine;
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(string.Format(Languages.Translations[currentLanguage]["ErrorCapture"], ex.Message),
+                    MessageBox.Show(string.Format(Languages.Translations[AppConfig.Language]["ErrorCapture"], ex.Message),
                         "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             else
             {
                 sniffer.StopCapture();
-                scanButton.Text = Languages.Translations[currentLanguage]["StartScan"];
+                scanButton.Text = Languages.Translations[AppConfig.Language]["StartScan"];
                 interfaceComboBox.Enabled = true;
-                languageComboBox.Enabled = true;
-
-                logTextBox.Text += $"[{DateTime.Now:HH:mm:ss.fff}] " +
-                    Languages.Translations[currentLanguage]["ScanComplete"] + Environment.NewLine;
             }
         }
 
@@ -285,10 +281,7 @@ namespace NetworkDiscovery
     public class NetworkInterfaceItem
     {
         public ICaptureDevice Device { get; }
-        public NetworkInterfaceItem(ICaptureDevice device)
-        {
-            Device = device;
-        }
+        public NetworkInterfaceItem(ICaptureDevice device) => Device = device;
         public override string ToString() => Device.Description;
     }
 }

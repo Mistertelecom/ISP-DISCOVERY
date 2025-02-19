@@ -28,6 +28,7 @@ namespace NetworkDiscovery
         public string DiscoveryMethod { get; set; }
         public string DeviceType { get; set; }
         public string Version { get; set; }
+        public string Model { get; set; }
     }
 
     public class NetworkSniffer
@@ -46,14 +47,23 @@ namespace NetworkDiscovery
         public event EventHandler<Device> OnDeviceDiscovered;
         public event EventHandler<PacketCaptureEventArgs> OnPacketCaptured;
 
-        // Simplificando o filtro para garantir que você veja pacotes IP e ARP
         private const string CAPTURE_FILTER = "ip or arp";
 
         private static readonly Dictionary<string, HashSet<string>> ManufacturerOUIs = new Dictionary<string, HashSet<string>>
         {
-            ["Ubiquiti"] = new HashSet<string> { "DC9FDB", "24A43C", "788A20", "0418D6", "687251", "00156D", "44D9E7", "802AA8" },
-            ["Mikrotik"] = new HashSet<string> { "64D154", "2CC81B", "B869F4", "6C3B6B", "D4CA6D", "000C42", "4C5E0C", "E48D8C" },
-            ["Mimosa"] = new HashSet<string> { "F898B9", "586D8F", "7483C2", "DCFE07", "B0B1CD", "A0F3C1" }
+            ["Ubiquiti"] = new HashSet<string> { 
+                "00156D", "002722", "0418D6", "18E829", "245A4C", "24A43C", "28704E", 
+                "44D9E7", "687251", "7483C2", "788A20", "784558", "802AA8", "942A6F", 
+                "AC8BA9", "B4FBE4", "D021F9", "DC9FDB", "E063DA", "F09FC2", "F492BF"
+            },
+            ["Mikrotik"] = new HashSet<string> { 
+                "000C42", "085531", "18FD74", "2CC81B", "488F5A", "48A98A", "4C5E0C", 
+                "64D154", "6C3B6B", "744D28", "789A18", "B869F4", "C4AD34", "CC2DE0", 
+                "D401C3", "D4CA6D", "DC2C6E", "E48D8C"
+            },
+            ["Mimosa"] = new HashSet<string> { 
+                "20B5C6", "F898B9", "586D8F", "7483C2", "DCFE07", "B0B1CD", "A0F3C1"
+            }
         };
 
         public NetworkSniffer()
@@ -61,6 +71,7 @@ namespace NetworkDiscovery
             discoveredDevices = new ConcurrentDictionary<string, Device>();
             processedAddresses = new ConcurrentDictionary<string, byte>();
             packetQueue = new BlockingCollection<RawCapture>(QUEUE_CAPACITY);
+            cancellationTokenSource = new CancellationTokenSource();
         }
 
         public void StartCapture(string deviceName)
@@ -75,7 +86,6 @@ namespace NetworkDiscovery
                 discoveredDevices.Clear();
                 processedAddresses.Clear();
                 packetQueue = new BlockingCollection<RawCapture>(QUEUE_CAPACITY);
-                cancellationTokenSource = new CancellationTokenSource();
 
                 processingTask = Task.WhenAll(Enumerable.Range(0, PROCESSING_THREADS)
                     .Select(_ => Task.Run(() => ProcessPacketsAsync(cancellationTokenSource.Token))));
@@ -83,7 +93,7 @@ namespace NetworkDiscovery
 
                 captureDevice.OnPacketArrival += PacketArrival;
                 captureDevice.Open(DeviceModes.Promiscuous);
-                captureDevice.Filter = CAPTURE_FILTER; 
+                captureDevice.Filter = CAPTURE_FILTER;
                 captureDevice.StartCapture();
             }
             catch (Exception)
@@ -100,7 +110,6 @@ namespace NetworkDiscovery
                 using (var udpClient = new UdpClient())
                 {
                     udpClient.EnableBroadcast = true;
-                    // Pacote MNDP simplificado, se quiser descobrir dispositivos Mikrotik
                     byte[] mndpPacket = new byte[] {
                         0x00, 0x00, 0x00, 0x00,
                         0x00, 0x01, 0x00, 0x04,
@@ -160,16 +169,14 @@ namespace NetworkDiscovery
                 var ethernetPacket = packet.Extract<EthernetPacket>();
                 if (ethernetPacket == null) return;
 
-                // Sempre registra IP
+                string sourceMac = ethernetPacket.SourceHardwareAddress.ToString()
+                    .Replace(":", "").Replace("-", "").ToUpper();
+
                 var ipPacket = packet.Extract<IPPacket>();
                 if (ipPacket != null)
                 {
-                    string sourceMac = ethernetPacket.SourceHardwareAddress.ToString()
-                        .Replace(":", "").Replace("-", "").ToUpper();
-
                     string sourceIP = ipPacket.SourceAddress.ToString();
 
-                    // Dispara evento OnPacketCaptured
                     OnPacketCaptured?.Invoke(this, new PacketCaptureEventArgs
                     {
                         SourceIP = sourceIP,
@@ -178,12 +185,28 @@ namespace NetworkDiscovery
                         Length = rawPacket.Data.Length
                     });
 
-                    // Se for primeira vez que vemos esse MAC, tenta identificar
                     if (processedAddresses.TryAdd(sourceMac, 1))
-                        CheckDevice(sourceIP, sourceMac);
+                    {
+                        string brand = DetermineManufacturer(sourceMac);
+                        if (brand != null)
+                        {
+                            var device = new Device
+                            {
+                                IPAddress = sourceIP,
+                                MacAddress = FormatMacAddress(sourceMac),
+                                Brand = brand,
+                                Name = $"{brand} Device",
+                                DiscoveryTime = DateTime.Now,
+                                DiscoveryMethod = "OUI",
+                                Model = DetermineModel(sourceMac, brand)
+                            };
+
+                            if (discoveredDevices.TryAdd(sourceMac, device))
+                                OnDeviceDiscovered?.Invoke(this, device);
+                        }
+                    }
                 }
 
-                // Processa protocolos de descoberta (CDP/MNDP)
                 if (ethernetPacket.Type == (EthernetType)0x2000)
                 {
                     ProcessCDPPacket(ethernetPacket, rawPacket.Data);
@@ -198,6 +221,24 @@ namespace NetworkDiscovery
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing packet: {ex.Message}");
+            }
+        }
+
+        private string DetermineModel(string macAddress, string brand)
+        {
+            string oui = macAddress.Substring(0, 6);
+            switch (brand)
+            {
+                case "Mimosa":
+                    if (oui == "20B5C6") return "C5x/B5x Series";
+                    else if (oui == "F898B9") return "A5c/A5x Series";
+                    else return "Mimosa Device";
+                case "Ubiquiti":
+                    return "Unifi Series";
+                case "Mikrotik":
+                    return "RouterBoard Series";
+                default:
+                    return "Unknown";
             }
         }
 
@@ -216,7 +257,8 @@ namespace NetworkDiscovery
                     MacAddress = FormatMacAddress(sourceMac),
                     Brand = "Mikrotik",
                     DiscoveryMethod = "MNDP",
-                    DiscoveryTime = DateTime.Now
+                    DiscoveryTime = DateTime.Now,
+                    Model = "RouterBoard Series"
                 };
 
                 int offset = 0;
@@ -258,7 +300,8 @@ namespace NetworkDiscovery
                 {
                     MacAddress = FormatMacAddress(sourceMac),
                     DiscoveryMethod = "CDP",
-                    DiscoveryTime = DateTime.Now
+                    DiscoveryTime = DateTime.Now,
+                    Model = "Cisco Device"
                 };
 
                 int offset = 22;
@@ -284,7 +327,6 @@ namespace NetworkDiscovery
                     offset += length;
                 }
 
-                // Heurística simples
                 if (device.Name?.Contains("UBNT", StringComparison.OrdinalIgnoreCase) == true)
                     device.Brand = "Ubiquiti";
                 else if (device.Name?.Contains("Cisco", StringComparison.OrdinalIgnoreCase) == true)
@@ -298,26 +340,6 @@ namespace NetworkDiscovery
             catch (Exception ex)
             {
                 Console.WriteLine($"Error processing CDP packet: {ex.Message}");
-            }
-        }
-
-        private void CheckDevice(string ip, string mac)
-        {
-            string brand = DetermineManufacturer(mac);
-            if (brand != null)
-            {
-                var device = new Device
-                {
-                    IPAddress = ip,
-                    MacAddress = FormatMacAddress(mac),
-                    Brand = brand,
-                    Name = $"{brand} Device",
-                    DiscoveryTime = DateTime.Now,
-                    DiscoveryMethod = "OUI"
-                };
-
-                if (discoveredDevices.TryAdd(mac, device))
-                    OnDeviceDiscovered?.Invoke(this, device);
             }
         }
 
