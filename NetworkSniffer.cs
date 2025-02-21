@@ -7,7 +7,9 @@ using System.Linq;
 using PacketDotNet;
 using SharpPcap;
 using System.Security.Principal;
-using NLog;
+using NLog; // Ensure this is the correct NLog reference
+using ILogger = NLog.ILogger; // Specify NLog's ILogger to avoid ambiguity
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.IO;
 using System.Text.Json.Serialization;
@@ -48,7 +50,9 @@ namespace NetworkDiscovery
     public class NetworkSniffer : IDisposable
     {
         private ICaptureDevice _device;
-        private readonly Dictionary<string, Device> _discoveredDevices;
+        private readonly ConcurrentDictionary<string, Device> _discoveredDevices;
+        private readonly ConcurrentDictionary<string, string> _dnsCache;
+        private static readonly ILogger Logger = LogManager.GetCurrentClassLogger();
         private CancellationTokenSource _cancellationTokenSource;
         private volatile bool _isRunning;
         private readonly object _lock = new object();
@@ -61,7 +65,8 @@ namespace NetworkDiscovery
 
         public NetworkSniffer()
         {
-            _discoveredDevices = new Dictionary<string, Device>();
+            _discoveredDevices = new ConcurrentDictionary<string, Device>();
+            _dnsCache = new ConcurrentDictionary<string, string>();
             _isRunning = false;
             _disposed = false;
             _vendorPrefixes = new Dictionary<string, (string Brand, string Type)>();
@@ -110,14 +115,14 @@ namespace NetworkDiscovery
                     }
                 }
 
-                Console.WriteLine($"Successfully loaded {_vendorPrefixes.Count} MAC address prefixes from vendor-macs.json");
+                    Logger.Info($"Successfully loaded {_vendorPrefixes.Count} MAC address prefixes from vendor-macs.json");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error loading vendor MAC prefixes: {ex.Message}");
+                Logger.Error($"Error loading vendor MAC prefixes: {ex.Message}");
                 if (ex is JsonException jsonEx)
                 {
-                    Console.WriteLine($"JSON parsing error: {jsonEx.Message}");
+                    Logger.Error($"JSON parsing error: {jsonEx.Message}");
                 }
                 _vendorPrefixes = new Dictionary<string, (string Brand, string Type)>();
             }
@@ -125,9 +130,21 @@ namespace NetworkDiscovery
 
         private bool IsAdministrator()
         {
-            var identity = WindowsIdentity.GetCurrent();
-            var principal = new WindowsPrincipal(identity);
-            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            try
+            {
+                using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
+                {
+                    WindowsPrincipal principal = new WindowsPrincipal(identity);
+                    bool isAdmin = principal.IsInRole(WindowsBuiltInRole.Administrator);
+                    Logger.Debug($"Administrator check result: {isAdmin}");
+                    return isAdmin;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error checking administrator privileges: {ex.Message}");
+                return false;
+            }
         }
 
         public void StartCapture(string deviceName)
@@ -172,8 +189,8 @@ namespace NetworkDiscovery
                         _device.StartCapture();
                         _isRunning = true;
 
-                        Console.WriteLine($"Started capturing on interface: {deviceName}");
-                        Console.WriteLine("Packet filter: " + _device.Filter);
+                        Logger.Info($"Started capturing on interface: {deviceName}");
+                        Logger.Debug("Packet filter: " + _device.Filter);
 
                         _processingTask = Task.Run(ProcessPacketsAsync, _cancellationTokenSource.Token);
                     }
@@ -212,7 +229,7 @@ namespace NetworkDiscovery
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($"Error stopping capture: {ex.Message}");
+                            Logger.Error($"Error stopping capture: {ex.Message}");
                         }
                         finally
                         {
@@ -228,7 +245,7 @@ namespace NetworkDiscovery
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error waiting for processing task: {ex.Message}");
+                        Logger.Error($"Error waiting for processing task: {ex.Message}");
                     }
                     finally
                     {
@@ -251,7 +268,7 @@ namespace NetworkDiscovery
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error during cleanup: {ex.Message}");
+                Logger.Error($"Error during cleanup: {ex.Message}");
             }
         }
 
@@ -262,7 +279,7 @@ namespace NetworkDiscovery
                 while (!_cancellationTokenSource.Token.IsCancellationRequested)
                 {
                     CleanupOldDevices();
-                    await Task.Delay(30000, _cancellationTokenSource.Token);
+                    await Task.Delay(300000, _cancellationTokenSource.Token); // Changed to 5 minutes
                 }
             }
             catch (OperationCanceledException)
@@ -271,7 +288,7 @@ namespace NetworkDiscovery
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error in packet processing: {ex.Message}");
+                Logger.Error($"Error in packet processing: {ex.Message}");
             }
         }
 
@@ -284,7 +301,8 @@ namespace NetworkDiscovery
 
             foreach (var device in oldDevices)
             {
-                _discoveredDevices.Remove(device.MacAddress);
+                Device removedDevice;
+                _discoveredDevices.TryRemove(device.MacAddress, out removedDevice);
             }
         }
 
@@ -303,49 +321,44 @@ namespace NetworkDiscovery
                 if (ethernetPacket == null) return;
 
                 var sourceMac = ethernetPacket.SourceHardwareAddress.ToString().Replace(":", "").ToUpper();
-                Console.WriteLine($"Packet received from MAC: {sourceMac}"); // Debug logging
-
-                var deviceInfo = GetVendorFromMac(sourceMac);
                 var ipPacket = packet.Extract<IPPacket>();
                 var sourceIP = ipPacket?.SourceAddress.ToString() ?? "Unknown";
+                var deviceInfo = GetVendorFromMac(sourceMac);
 
-                // Log all packets for debugging
-                Console.WriteLine($"Packet: MAC={sourceMac}, IP={sourceIP}, IsVendorMatch={deviceInfo.HasValue}");
-
-                if (!deviceInfo.HasValue)
-                {
-                    // Log unknown devices for debugging
-                    Console.WriteLine($"Unknown vendor MAC prefix: {sourceMac.Substring(0, 6)}");
-                    return;
-                }
+                Logger.Debug($"Packet: MAC={sourceMac}, IP={sourceIP}");
 
                 var signalStrength = CalculateSignalStrength(rawPacket);
 
                 lock (_lock)
                 {
-                    if (!_discoveredDevices.TryGetValue(sourceMac, out var device))
+                    Device device;
+                    if (!_discoveredDevices.TryGetValue(sourceMac, out device))
                     {
                         device = new Device
                         {
                             MacAddress = sourceMac,
-                            Brand = deviceInfo.Value.Brand,
-                            Model = deviceInfo.Value.Type,
+                            Brand = deviceInfo.HasValue ? deviceInfo.Value.Brand : "Unknown",
+                            Model = deviceInfo.HasValue ? deviceInfo.Value.Type : "Unknown",
                             DiscoveryMethod = "Packet Capture",
-                            LastSeen = DateTime.UtcNow
+                            LastSeen = DateTime.UtcNow,
+                            IPAddress = sourceIP,
+                            Name = GetHostname(sourceIP)
                         };
-                        _discoveredDevices.Add(sourceMac, device);
-                        Console.WriteLine($"New device discovered: {device.Brand} {device.Model} ({sourceMac})");
+                        _discoveredDevices.TryAdd(sourceMac, device);
+                        Logger.Info($"New device discovered: {device.Brand} {device.Model} ({sourceMac}) at {sourceIP}");
                         OnDeviceDiscovered?.Invoke(this, device);
                     }
-
-                    device.LastSeen = DateTime.UtcNow;
-                    device.SignalStrength = signalStrength;
-                    if (ipPacket != null)
+                    else
                     {
-                        device.IPAddress = sourceIP;
-                        if (string.IsNullOrEmpty(device.Name))
+                        device.LastSeen = DateTime.UtcNow;
+                        device.SignalStrength = signalStrength;
+                        if (ipPacket != null && device.IPAddress != sourceIP)
                         {
-                            device.Name = GetHostname(sourceIP);
+                            device.IPAddress = sourceIP;
+                            if (string.IsNullOrEmpty(device.Name))
+                            {
+                                device.Name = GetHostname(sourceIP);
+                            }
                         }
                     }
 
@@ -359,7 +372,7 @@ namespace NetworkDiscovery
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error processing packet: {ex.Message}");
+                Logger.Error($"Error processing packet: {ex.Message}");
             }
         }
 
@@ -386,8 +399,7 @@ namespace NetworkDiscovery
             var prefix = macAddress.Substring(0, 6);
             if (_vendorPrefixes.TryGetValue(prefix, out var vendorInfo))
             {
-                // Debug logging for MAC prefix matching
-                Console.WriteLine($"MAC prefix {prefix} matched to {vendorInfo.Brand} {vendorInfo.Type}");
+                Logger.Debug($"MAC prefix {prefix} matched to {vendorInfo.Brand} {vendorInfo.Type}");
                 return vendorInfo;
             }
 
@@ -396,17 +408,21 @@ namespace NetworkDiscovery
 
         private string GetHostname(string ip)
         {
-            if (string.IsNullOrEmpty(ip) || ip == "Unknown") return "Unknown";
-
-            try
-            {
-                var hostEntry = Dns.GetHostEntry(ip);
-                return hostEntry.HostName;
-            }
-            catch
-            {
+            if (string.IsNullOrEmpty(ip) || ip == "Unknown") 
                 return "Unknown";
-            }
+
+            return _dnsCache.GetOrAdd(ip, address =>
+            {
+                try
+                {
+                    var hostEntry = Dns.GetHostEntry(address);
+                    return hostEntry.HostName;
+                }
+                catch
+                {
+                    return "Unknown";
+                }
+            });
         }
 
         private void ThrowIfDisposed()

@@ -52,11 +52,24 @@ if ($null -eq $npcapService) {
 
 # Stop existing processes
 Write-Host "Stopping existing processes..." -ForegroundColor Yellow
-Get-Process | Where-Object { $_.ProcessName -match 'electron|dotnet' } | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process | Where-Object { $_.ProcessName -match 'electron|dotnet|ISP Discovery' } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5  # Wait for processes to fully terminate
+
+# Clean up any existing lock files or temporary files
+Write-Host "Cleaning up..." -ForegroundColor Yellow
+if (Test-Path ".\node_modules") {
+    Remove-Item ".\node_modules" -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path ".\bin") {
+    Remove-Item ".\bin" -Recurse -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path ".\obj") {
+    Remove-Item ".\obj" -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # Install Node.js dependencies
 Write-Host "Installing Node.js dependencies..." -ForegroundColor Yellow
-npm install
+npm install --force
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error installing Node.js dependencies" -ForegroundColor Red
     exit 1
@@ -77,6 +90,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Build .NET backend
 Write-Host "Building .NET backend..." -ForegroundColor Yellow
+dotnet clean NetworkDiscovery.csproj
 dotnet build NetworkDiscovery.csproj --configuration Release
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Error building .NET backend" -ForegroundColor Red
@@ -85,8 +99,9 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Build completed successfully!" -ForegroundColor Green
 
-# Start the application
+# Start the application with a delay between backend and frontend
 Write-Host "Starting the application..." -ForegroundColor Green
+Start-Sleep -Seconds 2  # Give some time for ports to be released
 npm start
 
 # Keep the window open if there's an error
