@@ -1,51 +1,54 @@
 # ISP Discovery by Jp Tools 🌐
 
-## Version
-**v1.02**
-
 ## Description
-ISP Discovery é uma aplicação que permite a descoberta de dispositivos na rede local. Ele captura pacotes de rede e exibe informações sobre os dispositivos encontrados. A aplicação utiliza tecnologias como CDP (Cisco Discovery Protocol) e outras para identificar dispositivos na rede.
+ISP Discovery is a network scanning application that helps discover and monitor devices on your local network. This version features a modern web-based UI built with Electron and a powerful .NET Core backend for network operations.
 
 ## Features
-- Descoberta de dispositivos na rede
-- Interface amigável
-- Suporte a múltiplos idiomas (Português e Inglês)
+- Modern, responsive UI with dark/light theme support
+- Real-time device discovery and monitoring
+- Network packet capture and analysis
+- Cross-platform compatibility
+- WebSocket-based real-time updates
 
-## How to Use
-1. Selecione a interface de rede desejada.
-2. Clique em "Iniciar Varredura" para começar a descobrir dispositivos.
-3. Os dispositivos encontrados serão exibidos na lista.
-
-## Requirements
-- .NET 6.0 ou superior
-- Pacote SharpPcap
+## Prerequisites
+- Node.js (v14 or later)
+- .NET 6.0 SDK
+- npm (comes with Node.js)
 
 ## Installation
-Para instalar, clone o repositório e execute o projeto no Visual Studio.
 
----
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/ISP-DISCOVERY.git
+cd ISP-DISCOVERY
+```
 
-# ISP Discovery by Jp Tools 🌐
+2. Run the build script:
+```bash
+build.bat
+```
+
+This will:
+- Install Node.js dependencies
+- Build the Tailwind CSS styles
+- Restore .NET packages
+- Build the .NET backend
+- Start the application
+
+## Development
+
+To run the application in development mode with DevTools:
+```bash
+npm run dev
+```
+
+## Architecture
+- Frontend: Electron + HTML/CSS/JavaScript with Tailwind CSS
+- Backend: .NET 6.0 Web API with WebSocket support
+- Network Operations: SharpPcap for packet capture and analysis
+
+## License
+MIT License - See LICENSE file for details
 
 ## Version
-**v1.02**
-
-## Description
-ISP Discovery is an application that allows the discovery of devices on the local network. It captures network packets and displays information about the discovered devices. The application utilizes technologies such as CDP (Cisco Discovery Protocol) and others to identify devices on the network.
-
-## Features
-- Device discovery on the network
-- User-friendly interface
-- Multi-language support (Portuguese and English)
-
-## How to Use
-1. Select the desired network interface.
-2. Click "Start Scan" to begin discovering devices.
-3. The discovered devices will be displayed in the list.
-
-## Requirements
-- .NET 6.0 or higher
-- SharpPcap package
-
-## Installation
-To install, clone the repository and run the project in Visual Studio.
+v1.2

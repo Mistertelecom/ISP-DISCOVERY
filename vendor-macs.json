@@ -1,0 +1,89 @@
+{
+  "vendors": {
+    "Ubiquiti": {
+      "prefixes": {
+        "00156D": "Legacy",
+        "002722": "UniFi",
+        "0050C2": "AirMax",
+        "0418D6": "AirMax",
+        "0CEA14": "UniFi",
+        "18E829": "AirMax",
+        "1C0B8B": "UniFi",
+        "1C6A1B": "AirMax",
+        "245A4C": "AirMax",
+        "24A43C": "AirMax",
+        "28704E": "UniFi",
+        "44D9E7": "AirMax",
+        "58D61F": "UniFi",
+        "602232": "AirMax",
+        "687251": "AirMax",
+        "68D79A": "UniFi",
+        "6C63F8": "UniFi",
+        "70A741": "AirMax",
+        "7483C2": "AirMax",
+        "74ACB9": "UniFi",
+        "784558": "AirMax",
+        "788A20": "AirMax",
+        "802AA8": "AirMax",
+        "847848": "UniFi",
+        "942A6F": "UniFi",
+        "9C05D6": "UniFi",
+        "AC8BA9": "UniFi",
+        "B4FBE4": "AirMax",
+        "D021F9": "UniFi",
+        "D8B370": "AirMax",
+        "DC9FDB": "AirMax",
+        "E063DA": "UniFi",
+        "E43883": "UniFi",
+        "F09FC2": "AirMax",
+        "F492BF": "UniFi",
+        "F4E2C6": "UniFi",
+        "FCECDA": "AirMax"
+      }
+    },
+    "MikroTik": {
+      "prefixes": {
+        "000C42": "RouterBOARD",
+        "085531": "RouterBOARD",
+        "18FD74": "RouterBOARD",
+        "2CC81B": "RouterBOARD",
+        "488F5A": "RouterBOARD",
+        "48A98A": "RouterBOARD",
+        "4C5E0C": "RouterBOARD",
+        "64D154": "RouterBOARD",
+        "6C3B6B": "RouterBOARD",
+        "744D28": "RouterBOARD",
+        "789A18": "RouterBOARD",
+        "B869F4": "RouterBOARD",
+        "C4AD34": "RouterBOARD",
+        "CC2DE0": "RouterBOARD",
+        "D401C3": "RouterBOARD",
+        "D4CA6D": "RouterBOARD",
+        "DC2C6E": "RouterBOARD",
+        "E48D8C": "RouterBOARD",
+        "F41E57": "RouterBOARD",
+        "74CD0C": "RouterBOARD",
+        "78CD8E": "RouterBOARD"
+      }
+    },
+    "Mimosa": {
+      "prefixes": {
+        "20B5C6": "B5/B5c",
+        "849CA4": "A5/C5x",
+        "8CB6C5": "B11/B24",
+        "9070BF": "C1000",
+        "CC54FE": "N5-X",
+        "84E714": "B5-Lite",
+        "90D8F3": "C5c",
+        "94B40F": "A5-14",
+        "98DED0": "B24",
+        "ACB74F": "C5",
+        "B894D2": "B5",
+        "C0EA1D": "B11",
+        "D4DCCD": "A5-18",
+        "E894F6": "B5-Lite",
+        "F8D3A9": "C1000"
+      }
+    }
+  }
+}

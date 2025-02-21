@@ -1,221 +1,360 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
-using System.Net.Sockets;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
 using PacketDotNet;
 using SharpPcap;
+using System.Security.Principal;
+using NLog;
+using System.Text.Json;
+using System.IO;
+using System.Text.Json.Serialization;
 
 namespace NetworkDiscovery
 {
+    public class Device
+    {
+        public string Brand { get; set; }
+        public string IPAddress { get; set; }
+        public string MacAddress { get; set; }
+        public string Name { get; set; }
+        public string DiscoveryMethod { get; set; }
+        public string Model { get; set; }
+        public DateTime LastSeen { get; set; }
+        public int SignalStrength { get; set; }
+    }
+
     public class PacketCaptureEventArgs : EventArgs
     {
         public string SourceIP { get; set; }
-        public string DestinationIP { get; set; }
-        public string Protocol { get; set; }
-        public int Length { get; set; }
-    }
-
-    public class Device
-    {
-        public string Name { get; set; }
-        public string IPAddress { get; set; }
-        public string Brand { get; set; }
         public string MacAddress { get; set; }
-        public DateTime DiscoveryTime { get; set; }
-        public string DiscoveryMethod { get; set; }
-        public string DeviceType { get; set; }
-        public string Version { get; set; }
-        public string Model { get; set; }
+        public int SignalStrength { get; set; }
     }
 
-    public class NetworkSniffer
+    public class VendorData
     {
-        private ICaptureDevice captureDevice;
-        private ConcurrentDictionary<string, Device> discoveredDevices;
-        private ConcurrentDictionary<string, byte> processedAddresses;
-        private BlockingCollection<RawCapture> packetQueue;
-        private CancellationTokenSource cancellationTokenSource;
-        private Task processingTask;
-        private Task discoveryTask;
-        private const int QUEUE_CAPACITY = 10000;
-        private const int BATCH_SIZE = 200;
-        private const int PROCESSING_THREADS = 8;
+        [JsonPropertyName("vendors")]
+        public Dictionary<string, VendorInfo> Vendors { get; set; }
+    }
+
+    public class VendorInfo
+    {
+        [JsonPropertyName("prefixes")]
+        public Dictionary<string, string> Prefixes { get; set; }
+    }
+
+    public class NetworkSniffer : IDisposable
+    {
+        private ICaptureDevice _device;
+        private readonly Dictionary<string, Device> _discoveredDevices;
+        private CancellationTokenSource _cancellationTokenSource;
+        private volatile bool _isRunning;
+        private readonly object _lock = new object();
+        private Task _processingTask;
+        private bool _disposed;
+        private Dictionary<string, (string Brand, string Type)> _vendorPrefixes;
 
         public event EventHandler<Device> OnDeviceDiscovered;
         public event EventHandler<PacketCaptureEventArgs> OnPacketCaptured;
 
-        private const string CAPTURE_FILTER = "ip or arp";
-
-        private static readonly Dictionary<string, HashSet<string>> ManufacturerOUIs = new Dictionary<string, HashSet<string>>
-        {
-            ["Ubiquiti"] = new HashSet<string> { 
-                "00156D", "002722", "0418D6", "18E829", "245A4C", "24A43C", "28704E", 
-                "44D9E7", "687251", "7483C2", "788A20", "784558", "802AA8", "942A6F", 
-                "AC8BA9", "B4FBE4", "D021F9", "DC9FDB", "E063DA", "F09FC2", "F492BF"
-            },
-            ["Mikrotik"] = new HashSet<string> { 
-                "000C42", "085531", "18FD74", "2CC81B", "488F5A", "48A98A", "4C5E0C", 
-                "64D154", "6C3B6B", "744D28", "789A18", "B869F4", "C4AD34", "CC2DE0", 
-                "D401C3", "D4CA6D", "DC2C6E", "E48D8C"
-            },
-            ["Mimosa"] = new HashSet<string> { 
-                "20B5C6", "F898B9", "586D8F", "7483C2", "DCFE07", "B0B1CD", "A0F3C1"
-            }
-        };
-
         public NetworkSniffer()
         {
-            discoveredDevices = new ConcurrentDictionary<string, Device>();
-            processedAddresses = new ConcurrentDictionary<string, byte>();
-            packetQueue = new BlockingCollection<RawCapture>(QUEUE_CAPACITY);
-            cancellationTokenSource = new CancellationTokenSource();
+            _discoveredDevices = new Dictionary<string, Device>();
+            _isRunning = false;
+            _disposed = false;
+            _vendorPrefixes = new Dictionary<string, (string Brand, string Type)>();
+            LoadVendorPrefixes();
         }
 
-        public void StartCapture(string deviceName)
+        private void LoadVendorPrefixes()
         {
             try
             {
-                var devices = CaptureDeviceList.Instance;
-                captureDevice = devices.FirstOrDefault(d => d.Name == deviceName);
-                if (captureDevice == null)
-                    throw new Exception($"Network interface '{deviceName}' not found.");
-
-                discoveredDevices.Clear();
-                processedAddresses.Clear();
-                packetQueue = new BlockingCollection<RawCapture>(QUEUE_CAPACITY);
-
-                processingTask = Task.WhenAll(Enumerable.Range(0, PROCESSING_THREADS)
-                    .Select(_ => Task.Run(() => ProcessPacketsAsync(cancellationTokenSource.Token))));
-                discoveryTask = Task.Run(() => SendDiscoveryPacketsAsync(cancellationTokenSource.Token));
-
-                captureDevice.OnPacketArrival += PacketArrival;
-                captureDevice.Open(DeviceModes.Promiscuous);
-                captureDevice.Filter = CAPTURE_FILTER;
-                captureDevice.StartCapture();
-            }
-            catch (Exception)
-            {
-                StopCapture();
-                throw;
-            }
-        }
-
-        private async Task SendDiscoveryPacketsAsync(CancellationToken token)
-        {
-            try
-            {
-                using (var udpClient = new UdpClient())
+                string jsonPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "vendor-macs.json");
+                if (!File.Exists(jsonPath))
                 {
-                    udpClient.EnableBroadcast = true;
-                    byte[] mndpPacket = new byte[] {
-                        0x00, 0x00, 0x00, 0x00,
-                        0x00, 0x01, 0x00, 0x04,
-                        0x00, 0x00, 0x00, 0x00
-                    };
-
-                    while (!token.IsCancellationRequested)
-                    {
-                        await udpClient.SendAsync(mndpPacket, mndpPacket.Length, "255.255.255.255", 5678);
-                        await Task.Delay(500, token);
-                    }
+                    jsonPath = "vendor-macs.json"; // Try current directory if not found in base directory
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error in discovery sender: {ex.Message}");
-            }
-        }
 
-        private void PacketArrival(object sender, PacketCapture e)
-        {
-            if (!packetQueue.IsAddingCompleted)
-                packetQueue.TryAdd(e.GetPacket());
-        }
-
-        private async Task ProcessPacketsAsync(CancellationToken cancellationToken)
-        {
-            try
-            {
-                while (!cancellationToken.IsCancellationRequested)
+                if (!File.Exists(jsonPath))
                 {
-                    var packets = new List<RawCapture>();
-                    for (int i = 0; i < BATCH_SIZE && !cancellationToken.IsCancellationRequested; i++)
-                    {
-                        if (packetQueue.TryTake(out RawCapture packet, 50))
-                            packets.Add(packet);
-                        else break;
-                    }
-
-                    if (packets.Any())
-                        await Task.WhenAll(packets.Select(packet => Task.Run(() => ProcessPacket(packet))));
-                    else
-                        await Task.Delay(1);
+                    throw new FileNotFoundException("vendor-macs.json not found");
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error processing packets: {ex.Message}");
-            }
-        }
 
-        private void ProcessPacket(RawCapture rawPacket)
-        {
-            try
-            {
-                var packet = Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
-                var ethernetPacket = packet.Extract<EthernetPacket>();
-                if (ethernetPacket == null) return;
-
-                string sourceMac = ethernetPacket.SourceHardwareAddress.ToString()
-                    .Replace(":", "").Replace("-", "").ToUpper();
-
-                var ipPacket = packet.Extract<IPPacket>();
-                if (ipPacket != null)
+                string jsonContent = File.ReadAllText(jsonPath);
+                var options = new JsonSerializerOptions
                 {
-                    string sourceIP = ipPacket.SourceAddress.ToString();
+                    PropertyNameCaseInsensitive = true,
+                    AllowTrailingCommas = true
+                };
 
-                    OnPacketCaptured?.Invoke(this, new PacketCaptureEventArgs
-                    {
-                        SourceIP = sourceIP,
-                        DestinationIP = ipPacket.DestinationAddress.ToString(),
-                        Protocol = ipPacket.Protocol.ToString(),
-                        Length = rawPacket.Data.Length
-                    });
+                var vendorData = JsonSerializer.Deserialize<VendorData>(jsonContent, options);
+                
+                if (vendorData?.Vendors == null)
+                {
+                    throw new JsonException("Invalid JSON format: 'vendors' object not found");
+                }
 
-                    if (processedAddresses.TryAdd(sourceMac, 1))
+                _vendorPrefixes = new Dictionary<string, (string Brand, string Type)>();
+
+                foreach (var vendor in vendorData.Vendors)
+                {
+                    if (vendor.Value?.Prefixes != null)
                     {
-                        string brand = DetermineManufacturer(sourceMac);
-                        if (brand != null)
+                        foreach (var prefix in vendor.Value.Prefixes)
                         {
-                            var device = new Device
-                            {
-                                IPAddress = sourceIP,
-                                MacAddress = FormatMacAddress(sourceMac),
-                                Brand = brand,
-                                Name = $"{brand} Device",
-                                DiscoveryTime = DateTime.Now,
-                                DiscoveryMethod = "OUI",
-                                Model = DetermineModel(sourceMac, brand)
-                            };
-
-                            if (discoveredDevices.TryAdd(sourceMac, device))
-                                OnDeviceDiscovered?.Invoke(this, device);
+                            _vendorPrefixes[prefix.Key] = (vendor.Key, prefix.Value);
                         }
                     }
                 }
 
-                if (ethernetPacket.Type == (EthernetType)0x2000)
+                Console.WriteLine($"Successfully loaded {_vendorPrefixes.Count} MAC address prefixes from vendor-macs.json");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading vendor MAC prefixes: {ex.Message}");
+                if (ex is JsonException jsonEx)
                 {
-                    ProcessCDPPacket(ethernetPacket, rawPacket.Data);
+                    Console.WriteLine($"JSON parsing error: {jsonEx.Message}");
                 }
-                else
+                _vendorPrefixes = new Dictionary<string, (string Brand, string Type)>();
+            }
+        }
+
+        private bool IsAdministrator()
+        {
+            var identity = WindowsIdentity.GetCurrent();
+            var principal = new WindowsPrincipal(identity);
+            return principal.IsInRole(WindowsBuiltInRole.Administrator);
+        }
+
+        public void StartCapture(string deviceName)
+        {
+            ThrowIfDisposed();
+
+            if (!IsAdministrator())
+            {
+                throw new UnauthorizedAccessException("Administrator privileges are required to capture network traffic.");
+            }
+
+            lock (_lock)
+            {
+                if (_isRunning)
                 {
-                    var udpPacket = packet.Extract<UdpPacket>();
-                    if (udpPacket != null && (udpPacket.DestinationPort == 5678 || udpPacket.SourcePort == 5678))
-                        ProcessMNDPPacket(ethernetPacket, udpPacket);
+                    StopCapture();
+                }
+
+                try
+                {
+                    _cancellationTokenSource = new CancellationTokenSource();
+                    var devices = CaptureDeviceList.Instance;
+
+                    if (devices == null || devices.Count == 0)
+                    {
+                        throw new Exception("No network interfaces found. Make sure WinPcap/Npcap is installed.");
+                    }
+
+                    _device = devices.FirstOrDefault(d => d.Name == deviceName);
+
+                    if (_device == null)
+                    {
+                        throw new Exception($"Network interface '{deviceName}' not found.");
+                    }
+
+                    try
+                    {
+                        _device.Open(DeviceModes.Promiscuous, 1000);
+                        // Broader packet filter to capture more traffic
+                        _device.Filter = "ether proto 0x0800 or arp or udp port 5246 or udp port 5247 or port 80 or port 443 or icmp";
+                        _device.OnPacketArrival += Device_OnPacketArrival;
+                        _device.StartCapture();
+                        _isRunning = true;
+
+                        Console.WriteLine($"Started capturing on interface: {deviceName}");
+                        Console.WriteLine("Packet filter: " + _device.Filter);
+
+                        _processingTask = Task.Run(ProcessPacketsAsync, _cancellationTokenSource.Token);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new Exception($"Error opening network interface: {ex.Message}. Make sure you have administrator privileges and WinPcap/Npcap is installed.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CleanupCapture();
+                    throw new Exception($"Error starting capture: {ex.Message}");
+                }
+            }
+        }
+
+        public void StopCapture()
+        {
+            ThrowIfDisposed();
+
+            lock (_lock)
+            {
+                if (!_isRunning) return;
+
+                try
+                {
+                    _isRunning = false;
+                    _cancellationTokenSource?.Cancel();
+
+                    if (_device != null)
+                    {
+                        try
+                        {
+                            _device.StopCapture();
+                            _device.Close();
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Error stopping capture: {ex.Message}");
+                        }
+                        finally
+                        {
+                            _device = null;
+                        }
+                    }
+
+                    _discoveredDevices.Clear();
+                    
+                    try
+                    {
+                        _processingTask?.Wait(TimeSpan.FromSeconds(5));
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error waiting for processing task: {ex.Message}");
+                    }
+                    finally
+                    {
+                        _processingTask = null;
+                    }
+                }
+                finally
+                {
+                    _cancellationTokenSource?.Dispose();
+                    _cancellationTokenSource = null;
+                }
+            }
+        }
+
+        private void CleanupCapture()
+        {
+            try
+            {
+                StopCapture();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error during cleanup: {ex.Message}");
+            }
+        }
+
+        private async Task ProcessPacketsAsync()
+        {
+            try
+            {
+                while (!_cancellationTokenSource.Token.IsCancellationRequested)
+                {
+                    CleanupOldDevices();
+                    await Task.Delay(30000, _cancellationTokenSource.Token);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Normal cancellation
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in packet processing: {ex.Message}");
+            }
+        }
+
+        private void CleanupOldDevices()
+        {
+            var now = DateTime.UtcNow;
+            var oldDevices = _discoveredDevices.Values
+                .Where(d => (now - d.LastSeen).TotalMinutes > 5)
+                .ToList();
+
+            foreach (var device in oldDevices)
+            {
+                _discoveredDevices.Remove(device.MacAddress);
+            }
+        }
+
+        private void Device_OnPacketArrival(object sender, PacketCapture e)
+        {
+            if (!_isRunning) return;
+
+            try
+            {
+                var rawPacket = e.GetPacket();
+                if (rawPacket?.Data == null) return;
+
+                var packet = Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
+                var ethernetPacket = packet?.Extract<EthernetPacket>();
+                
+                if (ethernetPacket == null) return;
+
+                var sourceMac = ethernetPacket.SourceHardwareAddress.ToString().Replace(":", "").ToUpper();
+                Console.WriteLine($"Packet received from MAC: {sourceMac}"); // Debug logging
+
+                var deviceInfo = GetVendorFromMac(sourceMac);
+                var ipPacket = packet.Extract<IPPacket>();
+                var sourceIP = ipPacket?.SourceAddress.ToString() ?? "Unknown";
+
+                // Log all packets for debugging
+                Console.WriteLine($"Packet: MAC={sourceMac}, IP={sourceIP}, IsVendorMatch={deviceInfo.HasValue}");
+
+                if (!deviceInfo.HasValue)
+                {
+                    // Log unknown devices for debugging
+                    Console.WriteLine($"Unknown vendor MAC prefix: {sourceMac.Substring(0, 6)}");
+                    return;
+                }
+
+                var signalStrength = CalculateSignalStrength(rawPacket);
+
+                lock (_lock)
+                {
+                    if (!_discoveredDevices.TryGetValue(sourceMac, out var device))
+                    {
+                        device = new Device
+                        {
+                            MacAddress = sourceMac,
+                            Brand = deviceInfo.Value.Brand,
+                            Model = deviceInfo.Value.Type,
+                            DiscoveryMethod = "Packet Capture",
+                            LastSeen = DateTime.UtcNow
+                        };
+                        _discoveredDevices.Add(sourceMac, device);
+                        Console.WriteLine($"New device discovered: {device.Brand} {device.Model} ({sourceMac})");
+                        OnDeviceDiscovered?.Invoke(this, device);
+                    }
+
+                    device.LastSeen = DateTime.UtcNow;
+                    device.SignalStrength = signalStrength;
+                    if (ipPacket != null)
+                    {
+                        device.IPAddress = sourceIP;
+                        if (string.IsNullOrEmpty(device.Name))
+                        {
+                            device.Name = GetHostname(sourceIP);
+                        }
+                    }
+
+                    OnPacketCaptured?.Invoke(this, new PacketCaptureEventArgs 
+                    { 
+                        SourceIP = sourceIP,
+                        MacAddress = sourceMac,
+                        SignalStrength = signalStrength
+                    });
                 }
             }
             catch (Exception ex)
@@ -224,154 +363,82 @@ namespace NetworkDiscovery
             }
         }
 
-        private string DetermineModel(string macAddress, string brand)
-        {
-            string oui = macAddress.Substring(0, 6);
-            switch (brand)
-            {
-                case "Mimosa":
-                    if (oui == "20B5C6") return "C5x/B5x Series";
-                    else if (oui == "F898B9") return "A5c/A5x Series";
-                    else return "Mimosa Device";
-                case "Ubiquiti":
-                    return "Unifi Series";
-                case "Mikrotik":
-                    return "RouterBoard Series";
-                default:
-                    return "Unknown";
-            }
-        }
-
-        private void ProcessMNDPPacket(EthernetPacket ethernetPacket, UdpPacket udpPacket)
+        private int CalculateSignalStrength(RawCapture rawPacket)
         {
             try
             {
-                string sourceMac = ethernetPacket.SourceHardwareAddress.ToString()
-                    .Replace(":", "").Replace("-", "").ToUpper();
-
-                var payload = udpPacket.PayloadData;
-                if (payload.Length < 4) return;
-
-                var device = new Device
+                if (rawPacket.LinkLayerType == LinkLayers.Ieee80211)
                 {
-                    MacAddress = FormatMacAddress(sourceMac),
-                    Brand = "Mikrotik",
-                    DiscoveryMethod = "MNDP",
-                    DiscoveryTime = DateTime.Now,
-                    Model = "RouterBoard Series"
-                };
-
-                int offset = 0;
-                while (offset + 4 <= payload.Length)
-                {
-                    ushort type = BitConverter.ToUInt16(payload, offset);
-                    ushort length = BitConverter.ToUInt16(payload, offset + 2);
-
-                    if (offset + 4 + length > payload.Length) break;
-
-                    string value = System.Text.Encoding.UTF8.GetString(payload, offset + 4, length).Trim('\0');
-                    switch (type)
-                    {
-                        case 1: device.Name = value; break;
-                        case 5: device.Version = value; break;
-                        case 7: device.DeviceType = value; break;
-                        case 8: device.IPAddress = value; break;
-                    }
-                    offset += 4 + length;
+                    return BitConverter.ToInt32(rawPacket.Data, 22);
                 }
-
-                if (discoveredDevices.TryAdd(sourceMac, device))
-                    OnDeviceDiscovered?.Invoke(this, device);
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"Error processing MNDP packet: {ex.Message}");
+                // Ignore errors in signal strength calculation
             }
+            return 0;
         }
 
-        private void ProcessCDPPacket(EthernetPacket ethernetPacket, byte[] data)
+        private (string Brand, string Type)? GetVendorFromMac(string macAddress)
         {
+            if (string.IsNullOrEmpty(macAddress) || macAddress.Length < 6) return null;
+
+            var prefix = macAddress.Substring(0, 6);
+            if (_vendorPrefixes.TryGetValue(prefix, out var vendorInfo))
+            {
+                // Debug logging for MAC prefix matching
+                Console.WriteLine($"MAC prefix {prefix} matched to {vendorInfo.Brand} {vendorInfo.Type}");
+                return vendorInfo;
+            }
+
+            return null;
+        }
+
+        private string GetHostname(string ip)
+        {
+            if (string.IsNullOrEmpty(ip) || ip == "Unknown") return "Unknown";
+
             try
             {
-                string sourceMac = ethernetPacket.SourceHardwareAddress.ToString()
-                    .Replace(":", "").Replace("-", "").ToUpper();
-
-                var device = new Device
-                {
-                    MacAddress = FormatMacAddress(sourceMac),
-                    DiscoveryMethod = "CDP",
-                    DiscoveryTime = DateTime.Now,
-                    Model = "Cisco Device"
-                };
-
-                int offset = 22;
-                while (offset + 4 <= data.Length)
-                {
-                    int type = (data[offset] << 8) | data[offset + 1];
-                    int length = (data[offset + 2] << 8) | data[offset + 3];
-
-                    if (length < 4 || offset + length > data.Length) break;
-
-                    switch (type)
-                    {
-                        case 1:
-                            device.Name = System.Text.Encoding.ASCII.GetString(data, offset + 4, length - 4).Trim('\0');
-                            break;
-                        case 5:
-                            device.DeviceType = System.Text.Encoding.ASCII.GetString(data, offset + 4, length - 4).Trim('\0');
-                            break;
-                        case 6:
-                            device.Version = System.Text.Encoding.ASCII.GetString(data, offset + 4, length - 4).Trim('\0');
-                            break;
-                    }
-                    offset += length;
-                }
-
-                if (device.Name?.Contains("UBNT", StringComparison.OrdinalIgnoreCase) == true)
-                    device.Brand = "Ubiquiti";
-                else if (device.Name?.Contains("Cisco", StringComparison.OrdinalIgnoreCase) == true)
-                    device.Brand = "Cisco";
-                else
-                    device.Brand = "Unknown";
-
-                if (discoveredDevices.TryAdd(sourceMac, device))
-                    OnDeviceDiscovered?.Invoke(this, device);
+                var hostEntry = Dns.GetHostEntry(ip);
+                return hostEntry.HostName;
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"Error processing CDP packet: {ex.Message}");
+                return "Unknown";
             }
         }
 
-        private string DetermineManufacturer(string macAddress)
+        private void ThrowIfDisposed()
         {
-            string oui = macAddress.Substring(0, 6);
-            return ManufacturerOUIs.FirstOrDefault(m => m.Value.Contains(oui)).Key;
+            if (_disposed)
+            {
+                throw new ObjectDisposedException(nameof(NetworkSniffer));
+            }
         }
 
-        private string FormatMacAddress(string mac)
+        public void Dispose()
         {
-            return string.Join(":", Enumerable.Range(0, 6)
-                .Select(i => mac.Substring(i * 2, 2)));
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
 
-        public void StopCapture()
+        protected virtual void Dispose(bool disposing)
         {
-            try
+            if (_disposed) return;
+
+            if (disposing)
             {
-                cancellationTokenSource?.Cancel();
-                packetQueue.CompleteAdding();
-                if (captureDevice != null)
-                {
-                    captureDevice.StopCapture();
-                    captureDevice.Close();
-                }
-                Task.WaitAll(new[] { processingTask, discoveryTask }, 1000);
+                StopCapture();
+                _cancellationTokenSource?.Dispose();
             }
-            catch (Exception)
-            {
-                // Ignorar erros durante finalização
-            }
+
+            _disposed = true;
+        }
+
+        ~NetworkSniffer()
+        {
+            Dispose(false);
         }
     }
 }

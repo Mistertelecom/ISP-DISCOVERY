@@ -1,11 +1,17 @@
 @echo off
-echo Stopping running instances...
-taskkill /F /IM "ISP Discovery.exe" 2>nul
-timeout /t 2
+echo Installing global dependencies...
+call npm install -g electron
 
-echo Building application...
-dotnet restore NetworkDiscovery.csproj
-dotnet publish NetworkDiscovery.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+echo Installing project dependencies...
+call npm install electron --save-dev
+call npm install
 
-echo Build complete. Executable can be found in bin\Release\net6.0-windows\win-x64\publish\
-pause
+echo Building Tailwind CSS...
+call npx tailwindcss -i ./styles/input.css -o ./styles/output.css
+
+echo Building .NET backend...
+dotnet restore
+dotnet build
+
+echo Starting the application...
+call npm start

@@ -1,0 +1,36 @@
+{
+  "name": "isp-discovery",
+  "version": "1.0.0",
+  "description": "ISP Discovery Tool - Network Device Scanner",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --debug",
+    "build": "build.bat",
+    "watch:css": "tailwindcss -i ./styles/input.css -o ./styles/output.css --watch",
+    "build:css": "tailwindcss -i ./styles/input.css -o ./styles/output.css",
+    "dev:all": "concurrently \"npm run watch:css\" \"npm start\""
+  },
+  "author": "Jp Tools",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1",
+    "tailwindcss": "^3.4.0"
+  },
+  "dependencies": {
+    "@material-tailwind/html": "^2.0.0"
+  },
+  "build": {
+    "appId": "com.jptools.ispdiscovery",
+    "win": {
+      "target": "nsis",
+      "icon": "network.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
